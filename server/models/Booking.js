@@ -5,6 +5,8 @@ const bookingSchema = new mongoose.Schema({
     type: String,
     unique: true
   },
+
+  // ─── Customer ──────────────────────────────────────────────────────────────
   customer: {
     name: { type: String, required: true },
     fatherName: { type: String, default: '' },
@@ -24,17 +26,16 @@ const bookingSchema = new mongoose.Schema({
       pincode: { type: String, default: '' }
     }
   },
-  
-  vehicleId: {
-    type: String, // references Vehicle.vehicleId (e.g. VEH-00001)
-    required: true
-  },
+
+  // ─── Vehicle ───────────────────────────────────────────────────────────────
+  vehicleId: { type: String, required: true }, // e.g. VEH-00001
   vehicleDetails: {
     name: { type: String },
     regNumber: { type: String },
     category: { type: String }
   },
 
+  // ─── Rental Period ─────────────────────────────────────────────────────────
   rentalPeriod: {
     startDate: { type: Date, required: true },
     expectedEndDate: { type: Date, required: true },
@@ -42,25 +43,55 @@ const bookingSchema = new mongoose.Schema({
     actualReturnDate: { type: Date }
   },
 
+  // ─── Handover & Accessories ────────────────────────────────────────────────
   handover: {
     startMeter: { type: Number, default: 0 },
     fuelIncluded: { type: Boolean, default: false }
   },
+  accessoriesChecklist: {
+    helmetCount: { type: Number, default: 0 },
+    toolkit: { type: Boolean, default: false },
+    spareTyre: { type: Boolean, default: false },
+    firstAid: { type: Boolean, default: false }
+  },
 
+  // ─── Plan ──────────────────────────────────────────────────────────────────
   selectedPlan: {
-    planType: { type: String, required: true }, // Hourly, 12-Hour, 24-Hour, Weekly, Monthly
+    planType: { type: String, required: true }, // Hourly | 12-Hour | 24-Hour | Weekly | Monthly
     rate: { type: Number, required: true },
     kmLimit: { type: Number, default: 0 },
     extraKmCharge: { type: Number, default: 0 },
     extraHourCharge: { type: Number, default: 0 }
   },
 
+  // ─── Addons ────────────────────────────────────────────────────────────────
   addons: {
     helmetsCount: { type: Number, default: 0 },
-    helmetsPrice: { type: Number, default: 50 }, // Per helmet price
+    helmetsPrice: { type: Number, default: 50 },
     otherAccessories: { type: String, default: '' }
   },
 
+  // ─── Active Booking Snapshot ───────────────────────────────────────────────
+  // These are the PRIMARY source of truth. All screens must read from these.
+  durationHours: { type: Number, default: 0 },
+  durationDays: { type: Number, default: 0 },
+  expectedReturnDate: { type: Date },   // = rentalPeriod.expectedEndDate
+  actualPickupDate: { type: Date },     // = rentalPeriod.actualPickupDate
+  actualReturnDate: { type: Date },     // = rentalPeriod.actualReturnDate
+
+  rentalCost: { type: Number, default: 0 },       // cumulative base fare (incl. extensions)
+  securityDeposit: { type: Number, default: 0 },  // original deposit required
+  depositHeld: { type: Number, default: 0 },       // actual deposit collected so far
+  rentalPaid: { type: Number, default: 0 },        // total rental paid so far
+  outstandingRent: { type: Number, default: 0 },   // remaining rental due
+  collectAmount: { type: Number, default: 0 },     // final collection needed at settlement
+  refundAmount: { type: Number, default: 0 },      // refund due at settlement
+
+  discount: { type: Number, default: 0 },
+  baseFare: { type: Number, default: 0 },          // same as rentalCost (kept for compatibility during migration)
+
+  // ─── Payment ───────────────────────────────────────────────────────────────
+  paymentMode: { type: String, default: 'Cash' },
   paymentCollection: [{
     mode: { type: String, enum: ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Mixed', 'UPI Refund', 'Cash Refund', 'Mixed Refund'] },
     amount: { type: Number, default: 0 },
@@ -73,18 +104,23 @@ const bookingSchema = new mongoose.Schema({
     timestamp: { type: Date, default: Date.now }
   }],
 
-  accessoriesChecklist: {
-    helmetCount: { type: Number, default: 0 },
-    toolkit: { type: Boolean, default: false },
-    spareTyre: { type: Boolean, default: false },
-    firstAid: { type: Boolean, default: false }
+  depositDetails: {
+    mode: { type: String, enum: ['Cash', 'Online', 'Mixed'], default: 'Cash' },
+    cashAmount: { type: Number, default: 0 },
+    onlineAmount: { type: Number, default: 0 }
   },
 
+  // ─── Payment split totals (derived from paymentCollection) ─────────────────
+  cashAmount: { type: Number, default: 0 },
+  onlineAmount: { type: Number, default: 0 },
+  cardAmount: { type: Number, default: 0 },
+
+  // ─── Drop-Off ──────────────────────────────────────────────────────────────
   dropDetails: {
     actualTime: { type: Date },
     endMeter: { type: Number, default: 0 },
-    endFuelLevel: { type: String, enum: ['Empty', '25%', '50%', '75%', 'Full', ''] },
-    vehicleCondition: { type: String, enum: ['Excellent', 'Good', 'Minor Damage', 'Major Damage', 'Accident', ''] },
+    endFuelLevel: { type: String, enum: ['Empty', '25%', '50%', '75%', 'Full', ''], default: '' },
+    vehicleCondition: { type: String, enum: ['Excellent', 'Good', 'Minor Damage', 'Major Damage', 'Accident', ''], default: '' },
     damageNotes: { type: String, default: '' },
     damageCharges: { type: Number, default: 0 },
     cleaningCharges: { type: Number, default: 0 },
@@ -100,76 +136,39 @@ const bookingSchema = new mongoose.Schema({
     notes: { type: String, default: '' }
   },
 
+  // ─── Settlement sub-document (audit record of final settlement) ─────────────
   settlement: {
-    totalBill: { type: Number, default: 0 },
     actualBill: { type: Number, default: 0 },
-    previousPaid: { type: Number, default: 0 },
-    depositCollected: { type: Number, default: 0 },
+    totalBill: { type: Number, default: 0 },         // alias for actualBill (kept for compatibility)
+    previousPaid: { type: Number, default: 0 },      // = rentalPaid at settlement time
+    depositCollected: { type: Number, default: 0 },  // = depositHeld at settlement time
+    depositHeld: { type: Number, default: 0 },
+    depositAdjustment: { type: Number, default: 0 },
     depositRefund: { type: Number, default: 0 },
     depositRefundMode: { type: String, enum: ['Full', 'Partial', 'No Refund', ''], default: '' },
     depositRefundReason: { type: String, default: '' },
-    remainingToPay: { type: Number, default: 0 }
+    remainingToPay: { type: Number, default: 0 },    // = outstandingRent at settlement time
+    collectAmount: { type: Number, default: 0 },
+    refundAmount: { type: Number, default: 0 }
   },
 
-  depositDetails: {
-    mode: { type: String, enum: ['Cash', 'Online', 'Mixed'], default: 'Cash' },
-    cashAmount: { type: Number, default: 0 },
-    onlineAmount: { type: Number, default: 0 }
-  },
-
+  // ─── Booking Status ────────────────────────────────────────────────────────
   status: {
     type: String,
-    enum: ['Ongoing', 'Extended', 'Overdue', 'Completed', 'Cancelled', 'Reserved'],
+    enum: ['Reserved', 'Ongoing', 'Extended', 'Overdue', 'Completed', 'Cancelled'],
     default: 'Reserved'
   },
-  
-  workerId: {
-    type: String,
-    default: 'System'
-  },
-  
-  rentalPaid: { type: Number, default: 0 },
-  depositHeld: { type: Number, default: 0 },
-  outstandingRent: { type: Number, default: 0 },
-  cashAmount: { type: Number, default: 0 },
-  onlineAmount: { type: Number, default: 0 },
-  cardAmount: { type: Number, default: 0 },
-  paymentMode: { type: String, default: 'Cash' },
-  
-  // Active Booking Snapshot fields
-  expectedReturnDate: { type: Date },
-  actualReturnDate: { type: Date },
-  actualPickupDate: { type: Date },
-  rentalCost: { type: Number, default: 0 },
-  collectAmount: { type: Number, default: 0 },
-  refundAmount: { type: Number, default: 0 },
-  
-  // Keep fields compatible with earlier routers if needed
-  customerName: { type: String },
-  customerPhone: { type: String },
-  customerIdProof: { type: String },
-  pickupDate: { type: Date },
-  expectedDropDate: { type: Date },
-  pickupLocation: { type: String },
-  dropLocation: { type: String },
-  perDayRate: { type: Number },
-  perHourRate: { type: Number },
-  discount: { type: Number, default: 0 },
-  advancePaid: { type: Number, default: 0 },
-  securityDeposit: { type: Number, default: 0 },
-  durationHours: { type: Number, default: 0 },
-  durationDays: { type: Number, default: 0 },
-  baseFare: { type: Number, default: 0 },
-  finalAmount: { type: Number, default: 0 },
-  paymentMethod: { type: String, default: 'Cash' },
-  settled: { type: Boolean, default: false },
 
+  workerId: { type: String, default: 'System' },
+
+  // ─── History ───────────────────────────────────────────────────────────────
   extensions: [{
     newEndDateTime: Date,
     extraCharges: Number,
     remarks: String,
     timestamp: { type: Date, default: Date.now }
   }],
+
   replacements: [{
     oldVehicleId: String,
     oldVehicleReg: String,
@@ -181,6 +180,8 @@ const bookingSchema = new mongoose.Schema({
     timestamp: { type: Date, default: Date.now },
     operatorName: String
   }],
+
+  // ─── Revision History (AUDIT ONLY — never used to drive calculations) ───────
   revisions: [{
     revisionNumber: { type: Number, required: true },
     actionType: { type: String },
@@ -188,43 +189,28 @@ const bookingSchema = new mongoose.Schema({
     operator: { type: String, default: 'System' },
     timestamp: { type: Date, default: Date.now },
     reason: { type: String, default: '' },
-    
-    // Financial differences (Old vs. New)
+
     oldValues: {
       rentalCost: Number,
       deposit: Number,
-      bookingValue: Number,
       rentalPaid: Number,
       depositCollected: Number,
-      outstandingRent: Number,
-      pendingDeposit: Number
+      outstandingRent: Number
     },
     newValues: {
       rentalCost: Number,
       deposit: Number,
-      bookingValue: Number,
       rentalPaid: Number,
       depositCollected: Number,
-      outstandingRent: Number,
-      pendingDeposit: Number
+      outstandingRent: Number
     },
-    difference: {
-      rentalCost: Number,
-      deposit: Number,
-      bookingValue: Number,
-      rentalPaid: Number,
-      depositCollected: Number
-    },
-    
-    // Balance snapshot immediately after this revision
+
     financialSnapshotAfterChange: {
       rentalCost: Number,
       depositHeld: Number,
-      bookingValue: Number,
       rentalPaid: Number,
       depositCollected: Number,
       outstandingRent: Number,
-      pendingDeposit: Number,
       paymentBreakdown: {
         rentalCash: { type: Number, default: 0 },
         rentalOnline: { type: Number, default: 0 },
@@ -235,14 +221,12 @@ const bookingSchema = new mongoose.Schema({
       }
     },
 
-    // Field-level change audit trail
     fieldChanges: [{
       fieldName: String,
       oldValue: mongoose.Schema.Types.Mixed,
       newValue: mongoose.Schema.Types.Mixed
     }],
 
-    // Action-specific structural metadata
     collectionDetails: {
       amount: Number,
       mode: String,
@@ -287,17 +271,17 @@ const bookingSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Sync compatibility helpers on save
-bookingSchema.pre('save', async function(next) {
+// ─── Auto-generate bookingId ──────────────────────────────────────────────────
+bookingSchema.pre('save', async function (next) {
   if (!this.bookingId) {
     try {
       const lastBooking = await this.constructor.findOne(
         { bookingId: { $regex: /^VB-\d+$/ } },
         {},
-        { sort: { bookingId: -1 } }
+        { sort: { createdAt: -1 } }
       );
       let nextNum = 10001;
-      if (lastBooking && lastBooking.bookingId) {
+      if (lastBooking?.bookingId) {
         const parts = lastBooking.bookingId.split('-');
         nextNum = parseInt(parts[1], 10) + 1;
       }
@@ -307,78 +291,49 @@ bookingSchema.pre('save', async function(next) {
     }
   }
 
-  // Map sub-object variables to top-level fields for compatibility with older code blocks
-  if (this.customer) {
-    this.customerName = this.customer.name;
-    this.customerPhone = this.customer.phone;
-    this.customerIdProof = `DL: ${this.customer.alternatePhone || 'N/A'}`;
-  }
+  // ─── Keep snapshot fields in sync with rentalPeriod ────────────────────────
   if (this.rentalPeriod) {
-    this.pickupDate = this.rentalPeriod.startDate;
-    this.expectedDropDate = this.rentalPeriod.expectedEndDate;
-    this.expectedReturnDate = this.rentalPeriod.expectedEndDate;
-    this.actualReturnDate = this.rentalPeriod.actualReturnDate;
-    this.actualPickupDate = this.rentalPeriod.actualPickupDate;
-  }
-  if (this.selectedPlan) {
-    this.perDayRate = this.selectedPlan.planType.includes('Day') || this.selectedPlan.planType.includes('24') ? this.selectedPlan.rate : 0;
-    this.perHourRate = this.selectedPlan.planType.includes('Hour') ? this.selectedPlan.rate : 0;
-  }
-  
-  this.rentalCost = this.baseFare || 0;
-
-  if (this.settlement) {
-    this.securityDeposit = this.settlement.depositCollected;
-    this.advancePaid = this.settlement.previousPaid;
-    this.finalAmount = this.settlement.remainingToPay;
-    this.collectAmount = this.settlement.collectAmount || 0;
-    this.refundAmount = this.settlement.refundAmount || 0;
+    if (!this.expectedReturnDate && this.rentalPeriod.expectedEndDate) {
+      this.expectedReturnDate = this.rentalPeriod.expectedEndDate;
+    }
+    if (!this.actualPickupDate && this.rentalPeriod.actualPickupDate) {
+      this.actualPickupDate = this.rentalPeriod.actualPickupDate;
+    }
+    if (!this.actualReturnDate && this.rentalPeriod.actualReturnDate) {
+      this.actualReturnDate = this.rentalPeriod.actualReturnDate;
+    }
   }
 
-  // Force active snapshot fields to stay in sync
-  this.rentalPaid = this.advancePaid || 0;
-  this.depositHeld = this.securityDeposit || 0;
-  this.outstandingRent = this.finalAmount || 0;
-
-  // Enforce discount lock rule: discount cannot exceed baseFare
-  if (this.discount > (this.baseFare || 0)) {
-    this.discount = this.baseFare || 0;
+  // ─── Keep rentalCost in sync with baseFare ─────────────────────────────────
+  if (this.baseFare > 0 && this.rentalCost === 0) {
+    this.rentalCost = this.baseFare;
+  }
+  if (this.rentalCost > 0) {
+    this.baseFare = this.rentalCost;
   }
 
-  // Calculate splits from paymentCollection
+  // ─── Calculate payment mode splits from paymentCollection ─────────────────
   let cash = 0;
   let online = 0;
   let card = 0;
-  if (this.paymentCollection && this.paymentCollection.length > 0) {
+  if (this.paymentCollection?.length > 0) {
     this.paymentCollection.forEach(p => {
-      const amt = p.amount || 0;
       if (p.mode === 'Cash') {
-        cash += amt;
+        cash += p.cashAmount || p.amount || 0;
       } else if (p.mode === 'Card') {
-        card += amt;
+        card += p.cardAmount || p.amount || 0;
       } else if (p.mode === 'Mixed') {
-        if (p.cashAmount || p.onlineAmount || p.cardAmount) {
-          cash += p.cashAmount || 0;
-          online += p.onlineAmount || 0;
-          card += p.cardAmount || 0;
-        } else {
-          // parse mixed ref
-          const ref = p.reference || '';
-          const cashM = ref.match(/Cash:\s*([\d.]+)/i);
-          const onlineM = ref.match(/Online:\s*([\d.]+)/i);
-          const cardM = ref.match(/Card:\s*([\d.]+)/i);
-          if (cashM) cash += parseFloat(cashM[1]) || 0;
-          if (onlineM) online += parseFloat(onlineM[1]) || 0;
-          if (cardM) card += parseFloat(cardM[1]) || 0;
-        }
+        cash += p.cashAmount || 0;
+        online += p.onlineAmount || 0;
+        card += p.cardAmount || 0;
       } else if (['UPI', 'Online', 'Bank Transfer'].includes(p.mode)) {
-        online += amt;
+        online += p.onlineAmount || p.amount || 0;
       }
     });
   }
-  this.cashAmount = cash;
-  this.onlineAmount = online;
-  this.cardAmount = card;
+  this.cashAmount = Math.round(cash);
+  this.onlineAmount = Math.round(online);
+  this.cardAmount = Math.round(card);
 
   next();
 });

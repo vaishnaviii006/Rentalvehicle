@@ -1,270 +1,252 @@
 import express from 'express';
 import Booking from '../models/Booking.js';
 import Settlement from '../models/Settlement.js';
-import { 
-  isDbConnected, 
-  getBookings, 
-  getSettlements, 
-  addSettlement 
+import {
+  isDbConnected,
+  getBookings,
+  getSettlements,
+  addSettlement
 } from '../memoryDb.js';
 
+const router = express.Router();
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+/** Return YYYY-MM-DD string for a date value, or '' if invalid */
 const safeDateStr = (dateVal) => {
   if (!dateVal) return '';
   try {
     const d = new Date(dateVal);
-    if (isNaN(d.getTime())) return '';
-    return d.toISOString().slice(0, 10);
-  } catch (err) {
+    return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  } catch {
     return '';
   }
 };
 
-const parseMixedRef = (refStr) => {
-  let cash = 0;
-  let online = 0;
-  let card = 0;
-  if (!refStr) return { cash, online, card };
+/** Parse mixed payment reference string → { cash, online, card } */
+const parseMixedRef = (refStr = '') => {
   const cashMatch = refStr.match(/Cash:\s*([\d.]+)/i);
-  if (cashMatch) cash = parseFloat(cashMatch[1]) || 0;
   const onlineMatch = refStr.match(/Online:\s*([\d.]+)/i);
-  if (onlineMatch) online = parseFloat(onlineMatch[1]) || 0;
   const cardMatch = refStr.match(/Card:\s*([\d.]+)/i);
-  if (cardMatch) card = parseFloat(cardMatch[1]) || 0;
+  return {
+    cash: parseFloat(cashMatch?.[1]) || 0,
+    online: parseFloat(onlineMatch?.[1]) || 0,
+    card: parseFloat(cardMatch?.[1]) || 0
+  };
+};
+
+/**
+ * Get cash/online/card split for a single payment entry.
+ * Uses stored cashAmount/onlineAmount/cardAmount first (reliable),
+ * falls back to parsing Mixed reference string.
+ */
+const getPaymentSplit = (p) => {
+  let cash = 0, online = 0, card = 0;
+
+  if (p.mode === 'Cash') {
+    cash = p.cashAmount || p.amount || 0;
+  } else if (p.mode === 'Card') {
+    card = p.cardAmount || p.amount || 0;
+  } else if (['UPI', 'Online', 'Bank Transfer'].includes(p.mode)) {
+    online = p.onlineAmount || p.amount || 0;
+  } else if (p.mode === 'Mixed') {
+    // Use stored splits if available (set during normalization)
+    if (p.cashAmount || p.onlineAmount || p.cardAmount) {
+      cash = p.cashAmount || 0;
+      online = p.onlineAmount || 0;
+      card = p.cardAmount || 0;
+    } else {
+      // Fallback to parsing reference string
+      const split = parseMixedRef(p.reference || '');
+      cash = split.cash;
+      online = split.online;
+      card = split.card;
+    }
+  } else if (p.mode?.includes('Refund')) {
+    // Refund modes — treated as negative cash/online
+    cash = -(p.cashAmount || 0);
+    online = -(p.onlineAmount || 0);
+    card = -(p.cardAmount || 0);
+  }
+
   return { cash, online, card };
 };
 
-const getPaymentOperator = (p, revisions) => {
-  if (!revisions || revisions.length === 0) return 'System';
-  let closestRev = null;
-  let minDiff = Infinity;
-  revisions.forEach(r => {
-    if (!r.timestamp) return;
-    const diff = Math.abs(new Date(r.timestamp).getTime() - new Date(p.timestamp).getTime());
-    if (diff < minDiff) {
-      minDiff = diff;
-      closestRev = r;
-    }
-  });
-  if (minDiff < 15000 && closestRev) {
-    return closestRev.operator || 'System';
-  }
-  return 'System';
-};
-
-const router = express.Router();
-
-// GET daily accounting summary with filters
+// ─── GET daily accounting summary ─────────────────────────────────────────────
 router.get('/', async (req, res) => {
   const { date, workerId, vehicleId } = req.query;
 
   try {
-    let bookingsToAnalyze = [];
+    const allBookings = isDbConnected()
+      ? await Booking.find()
+      : getBookings();
 
-    if (isDbConnected()) {
-      bookingsToAnalyze = await Booking.find();
-    } else {
-      bookingsToAnalyze = getBookings();
-    }
-
-    // Filter date matches (YYYY-MM-DD)
-    const targetDateStr = date || new Date().toISOString().slice(0, 10);
+    const targetDate = date || new Date().toISOString().slice(0, 10);
 
     let totalBookings = 0;
     let totalRevenue = 0;
-    let pendingPayments = 0;
-    let totalCashHandledByWorker = 0;
+    let totalOutstanding = 0;
 
-    const rentalCollections = { cash: 0, upi: 0, card: 0, total: 0 };
-    const depositCollections = { cash: 0, upi: 0, card: 0, total: 0 };
-    const depositRefunds = { cash: 0, upi: 0, card: 0, total: 0 };
+    const rentalCollections = { cash: 0, online: 0, card: 0, total: 0 };
+    const depositCollections = { cash: 0, online: 0, card: 0, total: 0 };
+    const depositRefunds = { cash: 0, online: 0, card: 0, total: 0 };
+    let totalCashHandledByWorker = 0;
 
     const matchedBookingsList = [];
 
-    bookingsToAnalyze.forEach(b => {
-      // Gather all activity today
-      const todayPayments = b.paymentCollection?.filter(p => safeDateStr(p.timestamp) === targetDateStr) || [];
-      const todayRevisions = b.revisions?.filter(r => safeDateStr(r.timestamp) === targetDateStr) || [];
-      const returnDateStr = safeDateStr(b.rentalPeriod?.actualReturnDate);
-      const isRefundToday = b.refundDetails?.status === 'Completed' && (returnDateStr === targetDateStr || safeDateStr(b.updatedAt || b.createdAt) === targetDateStr);
+    for (const b of allBookings) {
+      // ── Filter: only bookings with activity on targetDate ─────────────────
+      const todayPayments = (b.paymentCollection || []).filter(
+        p => safeDateStr(p.timestamp) === targetDate
+      );
+      const todayRevisions = (b.revisions || []).filter(
+        r => safeDateStr(r.timestamp) === targetDate
+      );
+
+      // Refund activity: completed refund and return date matches
+      const returnDateStr = safeDateStr(b.actualReturnDate || b.rentalPeriod?.actualReturnDate);
+      const isRefundToday =
+        b.refundDetails?.status === 'Completed' && returnDateStr === targetDate;
 
       if (todayPayments.length === 0 && todayRevisions.length === 0 && !isRefundToday) {
-        return; // No activity today
+        continue;
       }
 
-      // Check if workerId filter matches revision operators
-      let hasWorkerActivity = false;
-      if (!workerId || workerId === 'All') {
-        hasWorkerActivity = true;
-      } else {
-        const hasPaymentByWorker = todayPayments.some(p => {
-          const op = getPaymentOperator(p, b.revisions);
-          return op === workerId;
-        });
+      // ── Filter: worker ─────────────────────────────────────────────────────
+      const workerFilter = workerId && workerId !== 'All';
+
+      if (workerFilter) {
+        // Check payments attributed to this worker (workerId stored directly on payment)
+        const hasPaymentByWorker = todayPayments.some(p => p.workerId === workerId);
         const hasRevisionByWorker = todayRevisions.some(r => r.operator === workerId);
         let hasRefundByWorker = false;
         if (isRefundToday) {
-          const dropOffRev = b.revisions?.find(r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === targetDateStr);
+          const dropOffRev = (b.revisions || []).find(
+            r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === targetDate
+          );
           const refundOp = dropOffRev?.operator || b.workerId || 'System';
-          hasRefundByWorker = (refundOp === workerId);
+          hasRefundByWorker = refundOp === workerId;
         }
-        hasWorkerActivity = hasPaymentByWorker || hasRevisionByWorker || hasRefundByWorker;
+        if (!hasPaymentByWorker && !hasRevisionByWorker && !hasRefundByWorker) {
+          continue;
+        }
       }
 
-      if (!hasWorkerActivity) return;
+      // ── Filter: vehicle ────────────────────────────────────────────────────
+      if (vehicleId && vehicleId !== 'All' && b.vehicleId !== vehicleId) {
+        continue;
+      }
 
-      // Filter vehicle
-      if (vehicleId && vehicleId !== 'All' && b.vehicleId !== vehicleId) return;
-
-      // Increment matching count
       totalBookings++;
 
-      // Calculations based on Active Booking Snapshot
-      let revenueContrib = b.settlement?.actualBill || b.settlement?.totalBill || b.baseFare || 0;
+      // ── Revenue from snapshot fields (primary source of truth) ─────────────
+      const revenueContrib = Number(b.rentalCost) || Number(b.baseFare) || 0;
+      const outstandingContrib = Number(b.outstandingRent) || 0;
       totalRevenue += revenueContrib;
-      pendingPayments += b.settlement?.remainingToPay || b.outstandingRent || 0;
+      totalOutstanding += outstandingContrib;
 
-      // Loop through individual payments matching this day
-      todayPayments.forEach(p => {
-        const op = getPaymentOperator(p, b.revisions);
-        if (workerId && workerId !== 'All' && op !== workerId) return;
+      // ── Rental payment splits for today ────────────────────────────────────
+      for (const p of todayPayments) {
+        if (workerFilter && p.workerId !== workerId) continue;
 
-        let cash = 0;
-        let upi = 0;
-        let card = 0;
-
-        if (p.mode === 'Cash') cash = p.amount;
-        else if (p.mode === 'Card') card = p.amount;
-        else if (['UPI', 'Online', 'Bank Transfer'].includes(p.mode)) upi = p.amount;
-        else if (p.mode === 'Mixed') {
-          const split = parseMixedRef(p.reference);
-          cash = split.cash;
-          upi = split.online;
-          card = split.card;
-        }
-
+        const { cash, online, card } = getPaymentSplit(p);
         rentalCollections.cash += cash;
-        rentalCollections.upi += upi;
+        rentalCollections.online += online;
         rentalCollections.card += card;
-        rentalCollections.total += (cash + upi + card);
+        rentalCollections.total += cash + online + card;
 
-        if (op === workerId || !workerId || workerId === 'All') {
+        if (!workerFilter || p.workerId === workerId) {
           totalCashHandledByWorker += cash;
         }
-      });
+      }
 
-      // Loop through revisions today to find deposit collections
-      todayRevisions.forEach(rev => {
-        const op = rev.operator || 'System';
-        if (workerId && workerId !== 'All' && op !== workerId) return;
+      // ── Deposit collections from revisions today ───────────────────────────
+      for (const rev of todayRevisions) {
+        if (workerFilter && rev.operator !== workerId) continue;
+        if (!rev.depositDetails || (rev.depositDetails.difference || 0) <= 0) continue;
 
-        if (rev.depositDetails && rev.depositDetails.difference > 0) {
-          const diff = rev.depositDetails.difference;
-          let cash = 0;
-          let upi = 0;
-          let card = 0;
+        const diff = rev.depositDetails.difference || 0;
+        const mode = rev.depositDetails.mode || '';
+        let cash = 0, online = 0, card = 0;
 
-          if (rev.depositDetails.mode === 'Cash') {
-            cash = diff;
-          } else if (rev.depositDetails.mode === 'Card') {
-            card = diff;
-          } else if (['UPI', 'Online'].includes(rev.depositDetails.mode)) {
-            upi = diff;
-          } else if (rev.depositDetails.mode === 'Mixed') {
-            const prevRev = b.revisions.find(r => r.revisionNumber === rev.revisionNumber - 1);
-            const curCash = rev.financialSnapshotAfterChange?.paymentBreakdown?.depositCash || 0;
-            const prevCash = prevRev ? (prevRev.financialSnapshotAfterChange?.paymentBreakdown?.depositCash || 0) : 0;
-            cash = Math.max(0, curCash - prevCash);
-
-            const curOnline = rev.financialSnapshotAfterChange?.paymentBreakdown?.depositOnline || 0;
-            const prevOnline = prevRev ? (prevRev.financialSnapshotAfterChange?.paymentBreakdown?.depositOnline || 0) : 0;
-            upi = Math.max(0, curOnline - prevOnline);
-
-            const curCard = rev.financialSnapshotAfterChange?.paymentBreakdown?.depositCard || 0;
-            const prevCard = prevRev ? (prevRev.financialSnapshotAfterChange?.paymentBreakdown?.depositCard || 0) : 0;
-            card = Math.max(0, curCard - prevCard);
-          }
-
-          depositCollections.cash += cash;
-          depositCollections.upi += upi;
-          depositCollections.card += card;
-          depositCollections.total += (cash + upi + card);
-
-          if (op === workerId || !workerId || workerId === 'All') {
-            totalCashHandledByWorker += cash;
-          }
+        if (mode === 'Cash') {
+          cash = diff;
+        } else if (mode === 'Card') {
+          card = diff;
+        } else if (['UPI', 'Online'].includes(mode)) {
+          online = diff;
+        } else if (mode === 'Mixed') {
+          // Use snapshot paymentBreakdown delta to get accurate mixed split
+          const snapshot = rev.financialSnapshotAfterChange?.paymentBreakdown || {};
+          const prevRev = (b.revisions || []).find(r => r.revisionNumber === rev.revisionNumber - 1);
+          const prevSnapshot = prevRev?.financialSnapshotAfterChange?.paymentBreakdown || {};
+          cash = Math.max(0, (snapshot.depositCash || 0) - (prevSnapshot.depositCash || 0));
+          online = Math.max(0, (snapshot.depositOnline || 0) - (prevSnapshot.depositOnline || 0));
+          card = Math.max(0, (snapshot.depositCard || 0) - (prevSnapshot.depositCard || 0));
         }
-      });
 
-      // Loop through refunds today
+        depositCollections.cash += cash;
+        depositCollections.online += online;
+        depositCollections.card += card;
+        depositCollections.total += cash + online + card;
+        totalCashHandledByWorker += cash;
+      }
+
+      // ── Deposit refund today ───────────────────────────────────────────────
       if (isRefundToday) {
-        const dropOffRev = b.revisions?.find(r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === targetDateStr);
-        const op = dropOffRev?.operator || b.workerId || 'System';
-        
-        if (!workerId || workerId === 'All' || op === workerId) {
-          let cash = 0;
-          let upi = 0;
-          let card = 0;
-          const amt = b.refundDetails.amount || 0;
+        const dropOffRev = (b.revisions || []).find(
+          r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === targetDate
+        );
+        const refundOp = dropOffRev?.operator || b.workerId || 'System';
+        if (!workerFilter || refundOp === workerId) {
+          const refundAmt = Number(b.refundDetails?.amount) || 0;
+          const method = b.refundDetails?.method || '';
+          let cash = 0, online = 0, card = 0;
 
-          if (b.refundDetails.method === 'Cash') {
-            cash = amt;
-          } else if (b.refundDetails.method === 'Card') {
-            card = amt;
-          } else if (['UPI', 'Online'].includes(b.refundDetails.method)) {
-            upi = amt;
-          } else if (b.refundDetails.method === 'Mixed') {
-            const split = parseMixedRef(b.refundDetails.notes);
-            cash = split.cash;
-            upi = split.online;
-            card = split.card;
+          if (method === 'Cash') cash = refundAmt;
+          else if (method === 'Card') card = refundAmt;
+          else if (['UPI', 'Online'].includes(method)) online = refundAmt;
+          else if (method === 'Mixed') {
+            const split = parseMixedRef(b.refundDetails?.notes || '');
+            cash = split.cash; online = split.online; card = split.card;
           }
 
           depositRefunds.cash += cash;
-          depositRefunds.upi += upi;
+          depositRefunds.online += online;
           depositRefunds.card += card;
-          depositRefunds.total += (cash + upi + card);
-
-          if (op === workerId || !workerId || workerId === 'All') {
-            totalCashHandledByWorker -= cash;
-          }
+          depositRefunds.total += cash + online + card;
+          totalCashHandledByWorker -= cash; // refund is outgoing cash
         }
       }
 
       matchedBookingsList.push({
         bookingId: b.bookingId,
-        customerName: b.customer?.name || b.customerName,
+        customerName: b.customer?.name || '—',
         vehicleId: b.vehicleId,
-        vehicleName: b.vehicleDetails?.name || b.vehicleName,
+        vehicleName: b.vehicleDetails?.name || '—',
         status: b.status,
-        totalAmount: revenueContrib,
-        paid: b.settlement?.previousPaid || b.rentalPaid || 0,
-        pending: b.settlement?.remainingToPay || b.outstandingRent || 0,
-        refund: b.settlement?.depositRefund || 0,
+        rentalCost: revenueContrib,
+        rentalPaid: Number(b.rentalPaid) || 0,
+        outstanding: outstandingContrib,
+        depositHeld: Number(b.depositHeld) || 0,
+        collectAmount: Number(b.collectAmount) || 0,
+        refundAmount: Number(b.refundAmount) || 0,
         workerId: b.workerId
       });
-    });
+    }
 
-    // Worker Settlement details
+    // ── Worker settlement record ───────────────────────────────────────────
     let depositToAdmin = 0;
-    let balance = 0;
+    let workerBalance = totalCashHandledByWorker;
 
     if (date && workerId && workerId !== 'All') {
-      if (isDbConnected()) {
-        const settlementRecord = await Settlement.findOne({ date, workerId });
-        if (settlementRecord) {
-          depositToAdmin = settlementRecord.depositToAdmin;
-          balance = settlementRecord.balance;
-        } else {
-          balance = totalCashHandledByWorker;
-        }
-      } else {
-        const settlementRecord = getSettlements().find(s => s.date === date && s.workerId === workerId);
-        if (settlementRecord) {
-          depositToAdmin = settlementRecord.depositToAdmin;
-          balance = settlementRecord.balance;
-        } else {
-          balance = totalCashHandledByWorker;
-        }
+      const settlementRecord = isDbConnected()
+        ? await Settlement.findOne({ date, workerId })
+        : getSettlements().find(s => s.date === date && s.workerId === workerId);
+
+      if (settlementRecord) {
+        depositToAdmin = settlementRecord.depositToAdmin;
+        workerBalance = settlementRecord.balance;
       }
     }
 
@@ -272,41 +254,42 @@ router.get('/', async (req, res) => {
       summary: {
         totalBookings,
         totalRevenue,
+        totalOutstanding,
         rentalCollections,
         depositCollections,
         depositRefunds,
-        netCollection: rentalCollections.total - depositRefunds.total
+        netCashCollection: rentalCollections.cash + depositCollections.cash - depositRefunds.cash,
+        netCollection: rentalCollections.total + depositCollections.total - depositRefunds.total
       },
       bookings: matchedBookingsList,
       workerSettlement: {
         workerId: workerId || 'All',
         date: date || '',
-        totalCashHandled: totalCashHandledByWorker,
+        totalCashHandled: Math.round(totalCashHandledByWorker),
         depositToAdmin,
-        balance: date && workerId && workerId !== 'All' ? balance : totalCashHandledByWorker - depositToAdmin
+        balance: Math.round(workerBalance)
       }
     });
-
   } catch (error) {
+    console.error('[Accounting] Error computing daily summary:', error.message);
     res.status(500).json({ message: error.message });
   }
 });
 
-// GET settlements list
+// ─── GET settlements list ─────────────────────────────────────────────────────
 router.get('/settlements', async (req, res) => {
   try {
     if (isDbConnected()) {
       const settlements = await Settlement.find().sort({ createdAt: -1 });
-      res.json(settlements);
-    } else {
-      res.json(getSettlements().slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
+      return res.json(settlements);
     }
+    res.json(getSettlements().slice().sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// POST record worker deposit to admin
+// ─── POST record worker deposit to admin ──────────────────────────────────────
 router.post('/settle', async (req, res) => {
   const { date, workerId, depositAmount, remarks } = req.body;
 
@@ -315,76 +298,69 @@ router.post('/settle', async (req, res) => {
   }
 
   try {
-    let bookingsToSettle = [];
-    if (isDbConnected()) {
-      bookingsToSettle = await Booking.find();
-    } else {
-      bookingsToSettle = getBookings();
-    }
+    const allBookings = isDbConnected() ? await Booking.find() : getBookings();
 
+    // Calculate total cash this worker collected on this date
+    // Use workerId stored directly on each payment entry (reliable — no fuzzy timestamp matching)
     let totalCashCollected = 0;
-    bookingsToSettle.forEach(b => {
-      // Rental Cash Collections by this worker on this date
-      b.paymentCollection?.forEach(p => {
-        const pDateStr = safeDateStr(p.timestamp);
-        if (pDateStr === date && p.mode === 'Cash') {
-          const op = getPaymentOperator(p, b.revisions);
-          if (op === workerId) {
-            totalCashCollected += p.amount || 0;
-          }
-        }
-      });
 
-      // Deposit Cash Collections by this worker on this date
-      b.revisions?.forEach(rev => {
-        const revDateStr = safeDateStr(rev.timestamp);
-        if (revDateStr === date && rev.operator === workerId) {
-          if (rev.depositDetails && rev.depositDetails.difference > 0 && rev.depositDetails.mode === 'Cash') {
-            totalCashCollected += rev.depositDetails.difference;
-          }
-        }
-      });
-
-      // Cash Refund processed by this worker on this date
-      const returnDateStr = safeDateStr(b.rentalPeriod?.actualReturnDate);
-      const isRefundToday = b.refundDetails?.status === 'Completed' && (returnDateStr === date || safeDateStr(b.updatedAt || b.createdAt) === date);
-      if (isRefundToday && b.refundDetails.method === 'Cash') {
-        const dropOffRev = b.revisions?.find(r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === date);
-        const refundOp = dropOffRev?.operator || b.workerId || 'System';
-        if (refundOp === workerId) {
-          totalCashCollected -= (b.refundDetails.amount || 0);
+    for (const b of allBookings) {
+      // Rental cash payments by this worker today
+      for (const p of b.paymentCollection || []) {
+        if (safeDateStr(p.timestamp) === date && p.workerId === workerId) {
+          const { cash } = getPaymentSplit(p);
+          totalCashCollected += cash;
         }
       }
-    });
+
+      // Deposit cash collected via revisions by this worker today
+      for (const rev of b.revisions || []) {
+        if (
+          safeDateStr(rev.timestamp) === date &&
+          rev.operator === workerId &&
+          rev.depositDetails?.difference > 0 &&
+          rev.depositDetails?.mode === 'Cash'
+        ) {
+          totalCashCollected += rev.depositDetails.difference;
+        }
+      }
+
+      // Deduct cash refunds processed by this worker today
+      const returnDateStr = safeDateStr(b.actualReturnDate || b.rentalPeriod?.actualReturnDate);
+      const isRefundToday = b.refundDetails?.status === 'Completed' && returnDateStr === date;
+      if (isRefundToday && b.refundDetails?.method === 'Cash') {
+        const dropOffRev = (b.revisions || []).find(
+          r => r.actionType === 'DropOff' && safeDateStr(r.timestamp) === date
+        );
+        const refundOp = dropOffRev?.operator || b.workerId || 'System';
+        if (refundOp === workerId) {
+          totalCashCollected -= Number(b.refundDetails.amount) || 0;
+        }
+      }
+    }
 
     if (isDbConnected()) {
       let settlement = await Settlement.findOne({ date, workerId });
       if (!settlement) {
-        settlement = new Settlement({
-          date,
-          workerId,
-          cashCollected: totalCashCollected,
-          depositToAdmin: 0,
-          remarks: remarks || ''
-        });
+        settlement = new Settlement({ date, workerId, cashCollected: 0, depositToAdmin: 0 });
       }
-      settlement.cashCollected = totalCashCollected;
+      settlement.cashCollected = Math.round(totalCashCollected);
       settlement.depositToAdmin += Number(depositAmount);
       if (remarks) settlement.remarks = remarks;
-
-      const savedSettlement = await settlement.save();
-      res.json(savedSettlement);
-    } else {
-      const savedSettlement = addSettlement({
-        date,
-        workerId,
-        cashCollected: totalCashCollected,
-        depositAmount: Number(depositAmount),
-        remarks
-      });
-      res.json(savedSettlement);
+      const saved = await settlement.save();
+      return res.json(saved);
     }
+
+    const saved = addSettlement({
+      date,
+      workerId,
+      cashCollected: Math.round(totalCashCollected),
+      depositAmount: Number(depositAmount),
+      remarks
+    });
+    res.json(saved);
   } catch (error) {
+    console.error('[Accounting] Error recording settlement:', error.message);
     res.status(400).json({ message: error.message });
   }
 });

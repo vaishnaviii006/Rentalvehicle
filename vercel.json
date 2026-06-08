@@ -19,11 +19,18 @@
       "dest": "server/index.js"
     },
     {
+      "src": "/health",
+      "dest": "server/index.js"
+    },
+    {
       "handle": "filesystem"
     },
     {
       "src": "/(.*)",
-      "dest": "client/$1"
+      "dest": "/index.html"
     }
-  ]
+  ],
+  "env": {
+    "VERCEL": "1"
+  }
 }
