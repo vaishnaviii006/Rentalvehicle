@@ -17,6 +17,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Ensure MongoDB is connected before handling any request (crucial for serverless environments)
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState !== 1 && process.env.MONGODB_URI) {
+    await connectDB();
+  }
+  next();
+});
+
 // Routes
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/bookings', bookingRoutes);
@@ -379,4 +387,4 @@ app.listen(PORT, async () => {
   await seedData();
 });
 
-// Trigger reload for new MongoDB config
+export default app;
