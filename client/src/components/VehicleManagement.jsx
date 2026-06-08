@@ -491,7 +491,7 @@ export default function VehicleManagement({ vehicles, bookings = [], onAddVehicl
     }
 
     try {
-      const res = await fetch(`/api/vehicles/${selectedVehicle.vehicleId}`, {
+      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/vehicles/${selectedVehicle.vehicleId}`, {
         method: 'DELETE'
       });
       if (res.ok) {

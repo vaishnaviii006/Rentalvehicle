@@ -358,7 +358,7 @@ export default function App() {
 
   const fetchDbStatus = async () => {
     try {
-      const res = await fetch('/api/db-status');
+      const res = await fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/db-status');
       if (res.ok) {
         const data = await res.json();
         setDbStatus(data);
@@ -380,8 +380,8 @@ export default function App() {
   const fetchInitialData = async () => {
     try {
       const [vRes, bRes] = await Promise.all([
-        fetch('/api/vehicles'),
-        fetch('/api/bookings')
+        fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/vehicles'),
+        fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/bookings')
       ]);
 
       if (vRes.ok && bRes.ok) {
@@ -407,7 +407,7 @@ export default function App() {
   const handleAddVehicle = async (formData) => {
     if (backendActive) {
       try {
-        const res = await fetch('/api/vehicles', {
+        const res = await fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/vehicles', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData)
@@ -430,7 +430,7 @@ export default function App() {
   const handleUpdateVehicle = async (vehicleId, formData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/vehicles/${vehicleId}`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/vehicles/${vehicleId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(formData)
@@ -448,7 +448,7 @@ export default function App() {
   const handleToggleVehicleStatus = async (vehicleId, status) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/vehicles/${vehicleId}/status`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/vehicles/${vehicleId}/status`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status })
@@ -467,7 +467,7 @@ export default function App() {
   const handleConfirmBooking = async (bookingData) => {
     if (backendActive) {
       try {
-        const res = await fetch('/api/bookings', {
+        const res = await fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/bookings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(bookingData)
@@ -513,7 +513,7 @@ export default function App() {
   const handlePickup = async (bookingId, pickupData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/pickup`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/pickup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(pickupData)
@@ -537,7 +537,7 @@ export default function App() {
   const handleExtend = async (bookingId, extendData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/extend`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/extend`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(extendData)
@@ -596,7 +596,7 @@ export default function App() {
   const handleReplaceVehicle = async (bookingId, replaceData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/replace`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/replace`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(replaceData)
@@ -686,7 +686,7 @@ export default function App() {
   const handleDropOff = async (bookingId, dropOffData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/dropoff`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/dropoff`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(dropOffData)
@@ -765,7 +765,7 @@ export default function App() {
   const handleCancelBooking = async (bookingId) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/cancel`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/cancel`, {
           method: 'PATCH'
         });
         if (res.ok) fetchInitialData();
@@ -786,7 +786,7 @@ export default function App() {
   const handleAdminOverride = async (bookingId, overrideData) => {
     if (backendActive) {
       try {
-        const res = await fetch(`/api/bookings/${bookingId}/override`, {
+        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL || ''}/api/bookings/${bookingId}/override`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(overrideData)

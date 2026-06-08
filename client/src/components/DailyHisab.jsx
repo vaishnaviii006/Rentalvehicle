@@ -775,7 +775,7 @@ export default function DailyHisab({
   const fetchHisabData = async () => {
     setLoading(true);
     try {
-      const url = `/api/accounting?date=${dateFilter}&workerId=${workerFilter}&vehicleId=All`;
+      const url = `${import.meta.env.VITE_API_BASE_URL || ''}/api/accounting?date=${dateFilter}&workerId=${workerFilter}&vehicleId=All`;
       const response = await fetch(url);
       if (response.ok) {
         const data = await response.json();
@@ -992,7 +992,7 @@ export default function DailyHisab({
     }
 
     try {
-      const response = await fetch('/api/accounting/settle', {
+      const response = await fetch((import.meta.env.VITE_API_BASE_URL || '') + '/api/accounting/settle', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
