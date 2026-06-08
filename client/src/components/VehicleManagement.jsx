@@ -491,7 +491,7 @@ export default function VehicleManagement({ vehicles, bookings = [], onAddVehicl
     }
 
     try {
-      const res = await fetch(`http://localhost:5000/api/vehicles/${selectedVehicle.vehicleId}`, {
+      const res = await fetch(`/api/vehicles/${selectedVehicle.vehicleId}`, {
         method: 'DELETE'
       });
       if (res.ok) {
